@@ -1,0 +1,129 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function validDisplayName(value) {
+      return value is string && value.size() >= 1 && value.size() <= 40;
+    }
+
+    function validAvatar(value) {
+      return value is string
+        && value.size() <= 45000
+        && (value == '' || value.matches('data:image/jpeg;base64,[A-Za-z0-9+/=]+'));
+    }
+
+    function profileMatches(name, avatar) {
+      let profilePath = /databases/$(database)/documents/users/$(request.auth.uid);
+      return signedIn()
+        && exists(profilePath)
+        && get(profilePath).data.displayName == name
+        && get(profilePath).data.avatar == avatar;
+    }
+
+    function validProfile() {
+      return request.resource.data.keys().hasAll(['displayName', 'avatar', 'createdAt', 'updatedAt'])
+        && request.resource.data.keys().hasOnly(['displayName', 'avatar', 'createdAt', 'updatedAt'])
+        && validDisplayName(request.resource.data.displayName)
+        && validAvatar(request.resource.data.avatar)
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.updatedAt == request.time;
+    }
+
+    function validReview() {
+      return request.resource.data.keys().hasAll(['ownerId', 'authorName', 'avatar', 'text', 'stars', 'createdAt', 'updatedAt'])
+        && request.resource.data.keys().hasOnly(['ownerId', 'authorName', 'avatar', 'text', 'stars', 'createdAt', 'updatedAt'])
+        && request.resource.data.ownerId == request.auth.uid
+        && validDisplayName(request.resource.data.authorName)
+        && validAvatar(request.resource.data.avatar)
+        && profileMatches(request.resource.data.authorName, request.resource.data.avatar)
+        && request.resource.data.text is string
+        && request.resource.data.text.size() > 0
+        && request.resource.data.text.size() <= 600
+        && request.resource.data.stars is int
+        && request.resource.data.stars >= 1
+        && request.resource.data.stars <= 5
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+    }
+
+    function validComment(reviewId) {
+      let parentId = request.resource.data.parentId;
+      let parentPath = /databases/$(database)/documents/reviews/$(reviewId)/comments/$(parentId);
+      return request.resource.data.keys().hasAll(['ownerId', 'authorName', 'avatar', 'text', 'parentId', 'replyToName', 'createdAt', 'updatedAt'])
+        && request.resource.data.keys().hasOnly(['ownerId', 'authorName', 'avatar', 'text', 'parentId', 'replyToName', 'createdAt', 'updatedAt'])
+        && request.resource.data.ownerId == request.auth.uid
+        && validDisplayName(request.resource.data.authorName)
+        && validAvatar(request.resource.data.avatar)
+        && profileMatches(request.resource.data.authorName, request.resource.data.avatar)
+        && request.resource.data.text is string
+        && request.resource.data.text.size() > 0
+        && request.resource.data.text.size() <= 400
+        && parentId is string
+        && parentId.size() <= 100
+        && request.resource.data.replyToName is string
+        && request.resource.data.replyToName.size() <= 40
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && (parentId == '' || (exists(parentPath) && get(parentPath).data.parentId == ''));
+    }
+
+    match /users/{userId} {
+      // Anonymous profiles are private documents keyed by Firebase's anonymous auth UID.
+      allow get: if signedIn() && request.auth.uid == userId;
+      allow list: if false;
+      allow create: if signedIn()
+        && request.auth.uid == userId
+        && validProfile()
+        && request.resource.data.createdAt == request.time;
+      allow update: if signedIn()
+        && request.auth.uid == userId
+        && validProfile()
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName', 'avatar', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    match /reviews/{reviewId} {
+      // Anyone can read public feedback; only the anonymous author can change or remove it.
+      allow read: if true;
+      allow create: if signedIn() && validReview();
+      allow update: if signedIn()
+        && resource.data.ownerId == request.auth.uid
+        && request.resource.data.ownerId == resource.data.ownerId
+        && request.resource.data.authorName == resource.data.authorName
+        && request.resource.data.avatar == resource.data.avatar
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['text', 'stars', 'updatedAt'])
+        && request.resource.data.text is string
+        && request.resource.data.text.size() > 0
+        && request.resource.data.text.size() <= 600
+        && request.resource.data.stars is int
+        && request.resource.data.stars >= 1
+        && request.resource.data.stars <= 5
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if signedIn() && resource.data.ownerId == request.auth.uid;
+
+      match /comments/{commentId} {
+        allow read: if true;
+        allow create: if signedIn() && validComment(reviewId);
+        allow update: if signedIn()
+          && resource.data.ownerId == request.auth.uid
+          && request.resource.data.ownerId == resource.data.ownerId
+          && request.resource.data.authorName == resource.data.authorName
+          && request.resource.data.avatar == resource.data.avatar
+          && request.resource.data.parentId == resource.data.parentId
+          && request.resource.data.replyToName == resource.data.replyToName
+          && request.resource.data.createdAt == resource.data.createdAt
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['text', 'updatedAt'])
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0
+          && request.resource.data.text.size() <= 400
+          && request.resource.data.updatedAt == request.time;
+        allow delete: if signedIn() && resource.data.ownerId == request.auth.uid;
+      }
+    }
+  }
+}
